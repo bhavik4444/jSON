@@ -1,4 +1,4 @@
-"""MCP host: Telegram bot (long polling) + Gemini + an MCP server.
+"""MCP host: Telegram bot (long polling) + Gemini + one or more MCP servers.
 
 The laptop IS the server: this script polls Telegram outbound, so no public URL,
 ngrok or port forwarding is needed. Keep it running during the demo.
@@ -12,6 +12,7 @@ MCP flow (done explicitly here so you can see every step):
 import asyncio
 import logging
 import os
+from contextlib import AsyncExitStack
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -42,10 +43,14 @@ ALLOWED_CHAT_ID = os.getenv("ALLOWED_CHAT_ID", "").strip()
 MAX_TOOL_ROUNDS = 6  # safety limit on Gemini <-> MCP back-and-forth
 
 gemini_client = genai.Client()  # reads GEMINI_API_KEY from env
-MCP_SERVER = os.getenv("MCP_SERVER", "todoist_server.py")  # or calendar_server.py
-mcp_client = Client(str(Path(__file__).parent / MCP_SERVER))
 
-GEMINI_TOOLS: list[types.Tool] = []  # the tool menu, filled in at startup from the MCP server
+# One MCP client per MCP server (this is how MCP hosts work). Comma-separated list in .env, e.g.
+# MCP_SERVERS=todoist_server.py,finance_server.py   (calendar_server.py also works)
+MCP_SERVERS = [s.strip() for s in os.getenv("MCP_SERVERS", "todoist_server.py,finance_server.py").split(",") if s.strip()]
+MCP_CLIENTS = {name: Client(str(Path(__file__).parent / name)) for name in MCP_SERVERS}
+
+GEMINI_TOOLS: list[types.Tool] = []  # the combined tool menu, filled in at startup
+TOOL_ROUTES: dict[str, Client] = {}  # tool name -> the MCP client (server) that owns it
 
 # Short in-memory conversation history per chat so "move it to 2 PM" works.
 HISTORY: dict[str, list[types.Content]] = {}
@@ -62,6 +67,10 @@ async def handle_user_message(chat_id: str, user_text: str) -> str:
     now = datetime.now(ZoneInfo(TZ_NAME)).strftime("%Y-%m-%d %H:%M (%A)")
     system_prompt = (
         "You are a concise personal assistant connected to the user's apps via MCP tools. "
+        "You have tools from several apps (tasks and personal finance). One message can need tools "
+        "from more than one app, so call every tool the request needs. "
+        "Money is in Indian rupees. When logging an expense use a short lowercase category such as "
+        "food, transport, shopping, bills or entertainment (coffee, snacks and meals count as food). "
         f"Current local date and time: {now}. User timezone: {TZ_NAME}. "
         "Resolve words like 'today', 'tomorrow', 'next Monday' using that date. "
         "To change, complete or delete an existing item, first call the matching list tool to find its id. "
@@ -97,7 +106,8 @@ async def handle_user_message(chat_id: str, user_text: str) -> str:
             args = dict(fc.args or {})
             print(f"   🔧 MCP TOOL CALL  {fc.name}({args})")
             try:
-                result = await mcp_client.call_tool(fc.name, args)  # <-- MCP tools/call
+                client = TOOL_ROUTES[fc.name]  # which MCP server owns this tool?
+                result = await client.call_tool(fc.name, args)  # <-- MCP tools/call
                 text = _result_text(result)
             except Exception as e:
                 text = f"Error: {e}"
@@ -130,7 +140,7 @@ async def _authorized(update: Update) -> bool:
 async def on_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if await _authorized(update):
         await update.effective_message.reply_text(
-            "Hi! Try: 'Remind me to submit the deck tomorrow at 5 PM' or 'What's on my list today?'"
+            "Hi! Try: 'Spent 250 on coffee' or 'How much food budget is left?' or 'Remind me to submit the deck tomorrow at 5 PM'"
         )
 
 
@@ -156,23 +166,26 @@ async def main():
     app.add_handler(CommandHandler("start", on_start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_message))
 
-    print(f"Starting MCP host... connecting to {MCP_SERVER}")
-    async with mcp_client:  # starts the MCP server and connects
-        mcp_tools = await mcp_client.list_tools()  # MCP tools/list: "what can you do?"
-        print("MCP tools available:", ", ".join(t.name for t in mcp_tools))
-        # Translate the MCP tool descriptions into the format Gemini understands
-        GEMINI_TOOLS.append(
-            types.Tool(
-                function_declarations=[
+    print(f"Starting MCP host... connecting to: {', '.join(MCP_SERVERS)}")
+    async with AsyncExitStack() as stack:  # keeps every MCP server connected for the whole run
+        declarations = []
+        for name, client in MCP_CLIENTS.items():
+            await stack.enter_async_context(client)  # starts the server subprocess and connects
+            mcp_tools = await client.list_tools()  # MCP tools/list: "what can you do?"
+            print(f"  {name}: {', '.join(t.name for t in mcp_tools)}")
+            for t in mcp_tools:
+                if t.name in TOOL_ROUTES:
+                    raise RuntimeError(f"Two MCP servers both define a tool named '{t.name}'. Rename one.")
+                TOOL_ROUTES[t.name] = client
+                # Translate the MCP tool description into the format Gemini understands
+                declarations.append(
                     types.FunctionDeclaration(
                         name=t.name,
                         description=t.description or "",
                         parameters_json_schema=t.inputSchema,
                     )
-                    for t in mcp_tools
-                ]
-            )
-        )
+                )
+        GEMINI_TOOLS.append(types.Tool(function_declarations=declarations))
         async with app:
             me = await app.bot.get_me()  # fails right away if TELEGRAM_TOKEN is wrong
             print(f"Telegram login OK: bot is @{me.username}. Open THAT bot in Telegram and send /start")
