@@ -1,4 +1,4 @@
-# WhatsMCP 🚀
+# jSON 🚀
 
 > **Making MCP Matter:** Turn everyday WhatsApp messages into cross-app actions across your calendar, classroom, finances, and food delivery using the Model Context Protocol (MCP).
 
