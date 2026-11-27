@@ -7,7 +7,15 @@ authors = [
     { name = "bhavik4444", email = "bhavikjain1107@gmail.com" }
 ]
 requires-python = ">=3.14"
-dependencies = []
+dependencies = [
+    "fastmcp>=4.2.5",
+    "google-api-python-client>=2.202.0",
+    "google-auth-oauthlib>=1.5.0",
+    "google-genai>=3.6.1",
+    "mcp>=2.3.0",
+    "python-dotenv>=1.2.4",
+    "python-telegram-bot>=21",
+]
 
 [project.scripts]
 json = "json:main"

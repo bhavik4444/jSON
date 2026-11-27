@@ -1,0 +1,6 @@
+fastmcp
+mcp
+httpx
+google-genai
+python-dotenv
+python-telegram-bot>=21
